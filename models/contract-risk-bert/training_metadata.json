@@ -1,0 +1,49 @@
+{
+  "base_model": "klue/bert-base",
+  "labels": {
+    "0": "SAFE",
+    "1": "RISK"
+  },
+  "train_size": 74,
+  "test_size": 18,
+  "config": {
+    "data": "data/contract_clauses_labeled.csv",
+    "model_name": "klue/bert-base",
+    "output_dir": "models/contract-risk-bert",
+    "epochs": 3,
+    "batch_size": 8,
+    "max_length": 256,
+    "lr": 2e-05,
+    "test_ratio": 0.2,
+    "seed": 42
+  },
+  "history": [
+    {
+      "loss": 0.5296106934547424,
+      "accuracy": 0.7777777777777778,
+      "precision": 0.7777777777777778,
+      "recall": 0.7777777777777778,
+      "f1": 0.7777777777777778,
+      "epoch": 1,
+      "train_loss": 0.6289497494697571
+    },
+    {
+      "loss": 0.4128107925256093,
+      "accuracy": 0.7777777777777778,
+      "precision": 0.8571428571428571,
+      "recall": 0.6666666666666666,
+      "f1": 0.75,
+      "epoch": 2,
+      "train_loss": 0.31507950723171235
+    },
+    {
+      "loss": 0.40132052699724835,
+      "accuracy": 0.7777777777777778,
+      "precision": 0.8571428571428571,
+      "recall": 0.6666666666666666,
+      "f1": 0.75,
+      "epoch": 3,
+      "train_loss": 0.19466158375144005
+    }
+  ]
+}
