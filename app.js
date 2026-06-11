@@ -331,7 +331,7 @@ function renderClauses(clauses) {
 
     const text = document.createElement("p");
     text.className = "clause-text";
-    text.innerHTML = highlightEvidence(clause.text, clause.evidence);
+    text.innerHTML = highlightEvidence(clause.text, clause.evidence, clause.attentionSpans);
 
     const detail = document.createElement("div");
     detail.className = "clause-detail";
@@ -367,13 +367,41 @@ function escapeHtml(value) {
     .replace(/'/g, "&#039;");
 }
 
-function highlightEvidence(text, evidence) {
+function highlightEvidence(text, evidence, attentionSpans) {
+  // Prefer attention-based spans from BERT when available
+  if (attentionSpans && attentionSpans.length > 0) {
+    return highlightBySpans(text, attentionSpans);
+  }
+  // Fallback: rule-based keyword highlighting
   let escaped = escapeHtml(text);
   evidence.forEach((keyword) => {
     const safeKeyword = escapeHtml(keyword);
     escaped = escaped.replaceAll(safeKeyword, `<mark>${safeKeyword}</mark>`);
   });
   return escaped;
+}
+
+function highlightBySpans(text, spans) {
+  // Sort spans by start position and merge any overlaps
+  const sorted = [...spans].sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const [start, end] of sorted) {
+    if (merged.length && start <= merged[merged.length - 1][1]) {
+      merged[merged.length - 1][1] = Math.max(merged[merged.length - 1][1], end);
+    } else {
+      merged.push([start, end]);
+    }
+  }
+
+  let result = "";
+  let cursor = 0;
+  for (const [start, end] of merged) {
+    if (start > cursor) result += escapeHtml(text.slice(cursor, start));
+    result += `<mark>${escapeHtml(text.slice(start, end))}</mark>`;
+    cursor = end;
+  }
+  if (cursor < text.length) result += escapeHtml(text.slice(cursor));
+  return result;
 }
 
 function buildReportText(report) {

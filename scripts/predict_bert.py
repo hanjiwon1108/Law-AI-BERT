@@ -21,17 +21,101 @@ class BertRiskPredictor:
     def __init__(self, model_dir: str, max_length: int = 256):
         start = time.perf_counter()
         self.device = choose_device()
-        print(f"[model] device={self.device}", flush=True)
-        print(f"[model] loading tokenizer from {model_dir}", flush=True)
+        import sys
+        print(f"[model] device={self.device}", flush=True, file=sys.stderr)
+        print(f"[model] loading tokenizer from {model_dir}", flush=True, file=sys.stderr)
         self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
-        print(f"[model] loading model from {model_dir}", flush=True)
-        self.model = AutoModelForSequenceClassification.from_pretrained(model_dir)
-        print("[model] moving model to device", flush=True)
+        print(f"[model] loading model from {model_dir}", flush=True, file=sys.stderr)
+        self.model = AutoModelForSequenceClassification.from_pretrained(
+            model_dir, attn_implementation="eager"
+        )
+        print("[model] moving model to device", flush=True, file=sys.stderr)
         self.model.to(self.device)
         self.model.eval()
         self.max_length = max_length
         elapsed = time.perf_counter() - start
-        print(f"[model] ready in {elapsed:.2f}s", flush=True)
+        print(f"[model] ready in {elapsed:.2f}s", flush=True, file=sys.stderr)
+
+    def _extract_attention_spans(self, text: str, encoded: dict) -> list:
+        """Return character-level [start, end] spans using gradient-based attribution.
+
+        Computes d(risk_logit) / d(embedding) · embedding (input × gradient),
+        then takes the L2 norm per token as importance score.
+        This reflects which tokens actually drove the RISK classification decision.
+        """
+        encoded_with_offsets = self.tokenizer(
+            text,
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt",
+            return_offsets_mapping=True,
+        )
+        offset_mapping = encoded_with_offsets.pop("offset_mapping")[0]
+        input_ids = encoded_with_offsets["input_ids"][0].cpu()
+
+        encoded_device = {k: v.to(self.device) for k, v in encoded_with_offsets.items()}
+
+        # Get the embedding layer and compute gradients through it
+        embedding_layer = self.model.bert.embeddings.word_embeddings
+        input_embeds = embedding_layer(encoded_device["input_ids"])  # (1, seq, hidden)
+        input_embeds = input_embeds.detach().requires_grad_(True)
+
+        outputs = self.model(
+            inputs_embeds=input_embeds,
+            attention_mask=encoded_device.get("attention_mask"),
+            token_type_ids=encoded_device.get("token_type_ids"),
+        )
+        risk_logit = outputs.logits[0, 1]  # logit for RISK class
+        risk_logit.backward()
+
+        # input × gradient, L2 norm per token → importance score
+        grads = input_embeds.grad[0]  # (seq, hidden)
+        scores = (input_embeds.detach()[0] * grads).norm(dim=-1).cpu().float()  # (seq,)
+
+        special_ids = {
+            self.tokenizer.cls_token_id,
+            self.tokenizer.sep_token_id,
+            self.tokenizer.pad_token_id,
+        }
+
+        token_spans = []
+        for i, (tid, (char_start, char_end)) in enumerate(zip(input_ids.tolist(), offset_mapping.tolist())):
+            if tid in special_ids or char_start == char_end:
+                continue
+            token_spans.append((int(char_start), int(char_end), float(scores[i])))
+
+        if not token_spans:
+            return []
+
+        score_vals = torch.tensor([s for _, _, s in token_spans])
+        # Keep only top 15% of tokens — avoids marking everything as important
+        threshold = float(torch.quantile(score_vals, 0.85))
+
+        spans = []
+        current_start = None
+        current_end = None
+
+        for char_start, char_end, score in token_spans:
+            if score >= threshold:
+                if current_start is None:
+                    current_start = char_start
+                    current_end = char_end
+                elif char_start <= current_end + 2:
+                    current_end = char_end
+                else:
+                    spans.append([current_start, current_end])
+                    current_start = char_start
+                    current_end = char_end
+            else:
+                if current_start is not None:
+                    spans.append([current_start, current_end])
+                    current_start = None
+                    current_end = None
+
+        if current_start is not None:
+            spans.append([current_start, current_end])
+
+        return spans
 
     def predict_clause(self, text: str, index: int):
         encoded = self.tokenizer(
@@ -56,6 +140,8 @@ class BertRiskPredictor:
             "questions": ["계약 기간, 대금, 해지 조건 등 핵심 조건이 명확한지 확인하세요."],
         }
 
+        attention_spans = self._extract_attention_spans(text, encoded) if is_risk else []
+
         return {
             "id": f"clause-{index}",
             "index": index,
@@ -66,6 +152,7 @@ class BertRiskPredictor:
             "score": round(risk_probability * 100),
             "confidence": round(risk_probability if is_risk else float(probs[0]), 4),
             "evidence": info["evidence"],
+            "attentionSpans": attention_spans,
             "explanation": info["explanation"],
             "questions": info["questions"],
             "modelLabel": "RISK" if is_risk else "SAFE",
